@@ -3,14 +3,17 @@ import com.almasb.fxgl.app.GameApplication;
 import com.almasb.fxgl.entity.Entities;
 import com.almasb.fxgl.entity.GameEntity;
 import com.almasb.fxgl.entity.component.CollidableComponent;
-import com.almasb.fxgl.entity.component.PositionComponent;
 import com.almasb.fxgl.entity.component.TypeComponent;
+import com.almasb.fxgl.gameplay.Level;
 import com.almasb.fxgl.input.*;
+import com.almasb.fxgl.parser.TextLevelParser;
 import com.almasb.fxgl.physics.*;
 import com.almasb.fxgl.settings.GameSettings;
 import javafx.beans.property.IntegerProperty;
 import javafx.beans.property.SimpleIntegerProperty;
 import javafx.scene.input.KeyCode;
+import javafx.scene.text.Font;
+import javafx.scene.text.Text;
 import org.jbox2d.dynamics.BodyType;
 import org.jbox2d.dynamics.FixtureDef;
 
@@ -18,12 +21,9 @@ public class Breakout extends GameApplication
 {
     private GameEntity paddle, ball;
     private PaddleControl paddleControl;
-    private IntegerProperty bricks;
-
-    public enum Type
-    {
-        PADDLE, BALL, BRICK, SCREEN;
-    }
+    private IntegerProperty lvl, balls, bricks, score;
+    private TextLevelParser parser;
+    private Level level;
 
     @Override
     protected void initSettings(GameSettings gameSettings)
@@ -41,7 +41,6 @@ public class Breakout extends GameApplication
     protected void initInput()
     {
         Input input = getInput();
-
 
         input.addAction(new UserAction("Left")
         {
@@ -72,6 +71,18 @@ public class Breakout extends GameApplication
                 paddleControl.stop();
             }
         }, KeyCode.D);
+
+
+        input.addAction(new UserAction("Clear")
+        {
+            @Override
+            protected void onActionEnd()
+            {
+                bricks.set(0);
+                for(Entity brick : getGameWorld().getEntitiesByType(Type.BRICK))
+                    brick.removeFromWorld();
+            }
+        }, KeyCode.C);
     }
 
 
@@ -84,8 +95,15 @@ public class Breakout extends GameApplication
     @Override
     protected void initGame()
     {
-        bricks = new SimpleIntegerProperty();
-        bricks.set(30);
+        parser = new TextLevelParser();
+        parser.addEntityProducer('B', EntityFactory::newBrick);
+
+        lvl = new SimpleIntegerProperty();
+        level = parser.parse("breakout" + lvl.get() + ".txt");
+
+        balls = new SimpleIntegerProperty(3);
+
+        score = new SimpleIntegerProperty();    // starts at 0
 
         initScreenBounds();
         initPaddle();
@@ -95,11 +113,20 @@ public class Breakout extends GameApplication
 
     private void initScreenBounds()
     {
-        Entity walls = Entities.makeScreenBounds(10);
+        Entity walls = Entities.makeScreenBounds(120);
         walls.addComponent(new TypeComponent(Type.SCREEN));
         walls.addComponent(new CollidableComponent(true));
 
-        getGameWorld().addEntity(walls);
+        GameEntity bottom = Entities.builder().type(Type.BOTTOM).build();
+        bottom.setY(getHeight());
+        bottom.getBoundingBoxComponent().addHitBox(new HitBox("BODY", BoundingShape.box(getWidth(), 120)));
+
+        PhysicsComponent physics = new PhysicsComponent();
+        physics.setBodyType(BodyType.STATIC);
+        bottom.addComponent(physics);
+        bottom.addComponent(new CollidableComponent(true));
+
+        getGameWorld().addEntities(walls, bottom);
     }
 
     private void initPaddle()
@@ -148,20 +175,24 @@ public class Breakout extends GameApplication
 
     private void initBricks()
     {
-        for(int i = 0; i < bricks.get(); i++)
-        {
-            GameEntity brick = Entities.builder().type(Type.BRICK).build();
-            brick.setX(i % 10 * 64);
-            brick.setY(i / 10 * 32);
-            brick.setViewFromTextureWithBBox("brick.png");
-            brick.addComponent(new CollidableComponent(true));
+        long numBricks = level.getEntities()
+                .stream()
+                .filter(e -> Entities.getType(e).isType(Type.BRICK))
+                .count();
 
-            PhysicsComponent physics = new PhysicsComponent();
-            physics.setBodyType(BodyType.STATIC);
-            brick.addComponent(physics);
+        bricks = new SimpleIntegerProperty();
+        bricks.setValue(numBricks);
 
-            getGameWorld().addEntity(brick);
-        }
+        level.getEntities()
+                .stream()
+                .filter(e -> Entities.getType(e).isType(Type.BRICK))
+                .map(e -> Entities.getPosition(e).getValue())
+                .forEach(point -> {
+                    double x = point.getX() * 64;
+                    double y = 30 + point.getY() * 32;
+
+                    getGameWorld().addEntity(EntityFactory.newBrick(x, y));
+                });
     }
 
     @Override
@@ -175,6 +206,15 @@ public class Breakout extends GameApplication
             protected void onCollisionBegin(Entity a, Entity b)
             {
                 b.removeFromWorld();
+                bricks.set(bricks.get() - 1);
+                score.setValue(score.get() + 100);
+
+                if(bricks.get() <= 0)
+                {
+                    lvl.set(lvl.get() + 1);
+                    level = parser.parse("breakout" + lvl.get() + ".txt");
+                    initBricks();
+                }
             }
         });
 
@@ -183,18 +223,31 @@ public class Breakout extends GameApplication
             @Override
             protected void onCollisionBegin(Entity a, Entity b)
             {
-                PositionComponent aPosition = a.getComponentUnsafe(PositionComponent.class);
-                PositionComponent bPosition = b.getComponentUnsafe(PositionComponent.class);
+                PhysicsComponent physics =
+                        ball.getComponentUnsafe(PhysicsComponent.class);
 
-                PhysicsComponent physics = a.getComponentUnsafe(PhysicsComponent.class);
+                double x;
 
-                System.out.println("Ball = " + aPosition.getX() + 24 / 2);
-                System.out.println("Paddle = " + bPosition.getX() + 128 / 2);
-
-                if(aPosition.getX() + 24 / 2 > bPosition.getX() + 128 / 2)
-                    physics.setLinearVelocity(5, physics.getLinearVelocity().getY());
+                if(ball.getX() + 24 / 2 > paddle.getX() + 128 / 2)
+                    x = Math.abs(physics.getLinearVelocity().getX());
                 else
-                    physics.setLinearVelocity(-5, physics.getLinearVelocity().getY());
+                    x = -Math.abs(physics.getLinearVelocity().getX());
+
+                physics.setLinearVelocity(x, physics.getLinearVelocity().getY());
+            }
+        });
+
+        getPhysicsWorld().addCollisionHandler(new CollisionHandler(Type.BALL, Type.BOTTOM)
+        {
+            @Override
+            protected void onCollisionBegin(Entity a, Entity b)
+            {
+                a.removeFromWorld();
+                balls.set(balls.get() - 1);
+                if(balls.get() > 0)
+                    initBall();
+                else
+                    gameOver();
             }
         });
     }
@@ -202,13 +255,48 @@ public class Breakout extends GameApplication
     @Override
     protected void initUI()
     {
+        Text scoreText = new Text();
+        scoreText.setTranslateX(5);
+        scoreText.setTranslateY(20);
+        scoreText.setFont(Font.font(18));
+        scoreText.textProperty().bind(score.asString("Score: %d"));
 
+        Text ballsText = new Text();
+        ballsText.setTranslateX(getWidth() - 70);
+        ballsText.setTranslateY(20);
+        ballsText.setFont(Font.font(18));
+        ballsText.textProperty().bind(balls.asString("Balls: %d"));
+
+        Text bricksText = new Text();
+        bricksText.setTranslateX(getWidth() / 2);
+        bricksText.setTranslateY(20);
+        bricksText.setFont(Font.font(18));
+        bricksText.textProperty().bind(bricks.asString("Bricks: %d"));
+
+        getGameScene().addUINodes(scoreText, ballsText, bricksText);
     }
 
     @Override
     protected void onUpdate(double v)
     {
+        if(balls.get() <= 0)
+            gameOver();
+        else if(getGameWorld().getEntitiesByType(Type.BALL).isEmpty())
+            initBall();
+    }
 
+    private void gameOver()
+    {
+        int fontSize = 36;
+
+        Text gameOver = new Text("Game Over!");
+        int xOffset = gameOver.getText().length() / 2 * fontSize / 2;
+
+        gameOver.setX(getWidth() / 2 - xOffset);
+        gameOver.setY(getHeight() / 2);
+        gameOver.setFont(Font.font(fontSize));
+
+        getGameScene().addUINodes(gameOver);
     }
 
     public static void main(String[] args)
